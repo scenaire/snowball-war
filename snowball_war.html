@@ -611,6 +611,34 @@
             }
         });
 
+        window.addEventListener('message', function (e) {
+            if (!e.data || e.data.type !== 'SNOWBALL_CP') return;
+
+            const event = e.data.payload;
+
+            const rewardName =
+                event.reward?.title ||
+                event.reward?.name ||
+                '';
+
+            const username =
+                event.user?.username || 'viewer';
+
+            const config = REWARD_CONFIG[rewardName];
+            if (!config) return;
+
+            currentColor = config.color === 'random'
+                ? Object.keys(SNOWBALL_COLORS)[Math.floor(Math.random() * Object.keys(SNOWBALL_COLORS).length)]
+                : config.color;
+
+            for (let i = 0; i < config.count; i++) {
+                setTimeout(() => {
+                    throwSnowballCenter(config.isSub);
+                }, i * 400);
+            }
+        });
+
+
 
         function handleChannelPointsRedemption(event) {
             const rewardName =
