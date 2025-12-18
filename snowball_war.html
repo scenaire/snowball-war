@@ -584,6 +584,7 @@
 
         /* ================ StreamElements Integration ================ */
         // Listen for StreamElements events (Channel Points redemptions)
+        // Method 1: Direct event (when not in iframe)
         window.addEventListener('onEventReceived', function (obj) {
             if (!obj.detail || !obj.detail.event) return;
 
@@ -593,6 +594,27 @@
             // Handle Channel Points redemptions
             if (listener === 'redemption-latest') {
                 handleChannelPointsRedemption(event);
+            }
+        });
+
+        // Method 2: postMessage (when embedded in StreamElements iframe)
+        window.addEventListener('message', function (event) {
+            // Security: only accept messages from trusted origins
+            // You can add origin check here if needed
+
+            if (!event.data || !event.data.detail) return;
+
+            const obj = event.data;
+            if (!obj.detail.event) return;
+
+            const seEvent = obj.detail.event;
+            const listener = obj.detail.listener;
+
+            console.log('Received postMessage:', listener, seEvent);
+
+            // Handle Channel Points redemptions
+            if (listener === 'redemption-latest') {
+                handleChannelPointsRedemption(seEvent);
             }
         });
 
