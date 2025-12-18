@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="th">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Snowball War – Canvas Version</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
+            height: 100%;
+        }
+
+        #status {
+            position: absolute;
+            left: 10px;
+            top: 10px;
+            background: rgba(0, 0, 0, 0.45);
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 13px;
+            z-index: 9999;
+            pointer-events: none;
+        }
+
+        /* For users who open the page in browser (not OBS) */
+        .hint {
+            position: absolute;
+            right: 10px;
+            top: 10px;
+            background: rgba(255, 255, 255, 0.12);
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 12px;
+            z-index: 9999;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="c" tabindex="0"></canvas>
+    <div id="status">Snowball Ready</div>
+
+    <!-- tmi.js -->
+    <script src="https://github.com/tmijs/tmi.js/releases/download/v1.8.5/tmi.min.js"></script>
+
+    <script>
+        /* ================== CONFIG ================== */
+        const CHANNEL_NAME = 'c_nairs';     // เปลี่ยนเป็นชื่อช่องเธอ
+        const COMMAND = '!snow';
+        const USER_COOLDOWN = 8000;         // ms per user
+        const GLOBAL_RATE_LIMIT = 2000;     // ms global
+        const IMPACT_AUDIO_SRC = 'impact_snowball_hit_wall.mp3'; // ต้องมีไฟล์นี้ในโฟลเดอร์เดียวกัน หรือเป็น URL
+
+        /* ================== STREAMELEMENTS REWARDS CONFIG ================== */
+        // กำหนดชื่อ reward และพฤติกรรม (ตั้งค่าใน StreamElements ให้ตรงกับชื่อนี้)
+        const REWARD_CONFIG = {
+            'Basic Snowball': { count: 1, color: 'white', isSub: false },
+            'Colored Snowball': { count: 1, color: 'random', isSub: true },
+            'Triple Shot': { count: 3, color: 'random', isSub: true },
+            'Rainbow Barrage': { count: 5, color: 'rainbow', isSub: true }
+        };
+
+        // สีและการแรเงา (canvas จะใช้ radial gradient สำหรับลูกและสี particle)
+        const SNOWBALL_COLORS = {
+            white: { base: ['#ffffff', '#d8e7f7', '#b9cee6'], particle: '#ffffff' },
+            black: { base: ['#4a4a4a', '#2a2a2a', '#1a1a1a'], particle: '#2a2a2a' },
+            red: { base: ['#ff6b6b', '#ee5a6f', '#c92a2a'], particle: '#ff6b6b' },
+            blue: { base: ['#4dabf7', '#339af0', '#1c7ed6'], particle: '#4dabf7' },
+            green: { base: ['#51cf66', '#40c057', '#2f9e44'], particle: '#51cf66' },
+            yellow: { base: ['#ffd43b', '#fcc419', '#fab005'], particle: '#ffd43b' },
+            purple: { base: ['#cc5de8', '#be4bdb', '#9c36b5'], particle: '#cc5de8' },
+            pink: { base: ['#ff6b9d', '#f06595', '#e64980'], particle: '#ff6b9d' },
+            orange: { base: ['#ff922b', '#fd7e14', '#f76707'], particle: '#ff922b' },
+            gold: { base: ['#ffd700', '#ffb700', '#ff9500'], particle: '#ffd700' },
+            rainbow: { base: 'rainbow', particle: '#ffd700' }
+        };
+
+        let currentColor = 'white';
+
+        /* ================ Canvas Setup ================ */
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        /* ================ Audio (with cloning) ================ */
+        const impactMaster = new Audio(IMPACT_AUDIO_SRC);
+        impactMaster.preload = 'auto';
+        impactMaster.volume = 1.0;
+
+        function playImpact() {
+            try {
+                // clone so multiple impacts can overlap
+                const s = impactMaster.cloneNode();
+                s.play().catch(e => console.warn('Audio play failed:', e));
+            } catch (e) {
+                console.warn('Audio error', e);
+            }
+        }
+
+        // Auto-unlock audio สำหรับ OBS (หลังโหลดหน้า 1 วินาที)
+        setTimeout(() => {
+            impactMaster.play().then(() => {
+                impactMaster.pause();
+                impactMaster.currentTime = 0;
+                console.log('Audio unlocked for OBS');
+            }).catch(e => {
+                console.warn('Audio unlock failed (normal in some browsers):', e);
+            });
+        }, 1000);
+
+        /* ================ State & Pools ================ */
+        const balls = [];        // active snowballs
+        const particles = [];    // explosion particles
+        const puffs = [];        // visual puffs (for flashes / larger particles)
+        let lastGlobal = 0;
+        const userTimestamps = {};
+        // cleanup timestamps older than some time
+        setInterval(() => {
+            const now = Date.now();
+            for (const u in userTimestamps) {
+                if (now - userTimestamps[u] > 1000 * 60 * 10) delete userTimestamps[u];
+            }
+        }, 60_000);
+
+        /* Utility */
+        function rand(min, max) { return Math.random() * (max - min) + min; }
+        function screenCenter() {
+            // ปรับให้ตรงกับตำแหน่งโมเดล (กลางลำตัว)
+            return {
+                x: canvas.width / 2 + 50,  // เยื้องขวานิดหน่อย
+                y: canvas.height / 2        // ลงมาที่กลางจอพอดี (540px สำหรับ 1080p)
+            };
+        }
+
+        /* ================ Snowball Class ================ */
+        class Snowball {
+            constructor(start, target, colorKey, willHit, isSub = false) {
+                this.x = start.x; this.y = start.y;
+                this.start = { ...start };
+                this.tx = target.x; this.ty = target.y;
+                this.colorKey = colorKey;
+                this.willHit = willHit;
+                this.frame = 0;
+                this.duration = 60; // frames
+                this.isSub = isSub;
+                this.trail = [];
+
+                const dx = this.tx - this.x;
+                const dy = this.ty - this.y;
+                const gravity = 0.25;
+
+                if (this.willHit) {
+                    // ตรวจสอบว่าเป้าหมายอยู่ต่ำกว่าจุดเริ่มหรือไม่
+                    const targetBelowStart = this.ty > this.y; // เป้าหมายต่ำกว่า (y มากกว่า)
+
+                    if (targetBelowStart) {
+                        // ใช้ ballistic แบบเดิม (สำหรับเป้าหมายที่สูงกว่า เช่น หัว)
+                        const peakY = Math.min(this.ty, this.y) - 100;
+                        const distToPeak = peakY - this.y;
+                        this.vy = -Math.sqrt(2 * gravity * Math.abs(distToPeak));
+                        const timeToPeak = Math.abs(this.vy) / gravity;
+                        const fallDist = peakY - this.ty;
+                        const timeToFall = (Math.sqrt(this.vy * this.vy + 2 * gravity * Math.abs(fallDist)) - Math.abs(this.vy)) / gravity;
+                        const totalTime = timeToPeak + timeToFall;
+                        this.duration = Math.min(totalTime, 100);
+                        this.vx = dx / totalTime;
+                        this.gravity = 0.15; // ลดแรงโน้มถ่วง
+                    } else {
+                        // ใช้ direct shot (สำหรับเป้าหมายที่ต่ำกว่า เช่น ลำตัว)
+                        const dist = Math.hypot(dx, dy);
+                        const travelTime = 50; // เวลาคงที่
+                        const speed = dist / travelTime;
+                        this.vx = (dx / dist) * speed;
+                        this.vy = (dy / dist) * speed;
+                        this.duration = travelTime;
+                        this.gravity = 0.15; // ลดแรงโน้มถ่วงเพื่อให้บินตรงกว่า
+                    }
+                } else {
+                    // พลาด: ใช้วิธีเดิม
+                    const dist = Math.hypot(dx, dy) || 1;
+                    const speed = dist / this.duration;
+                    this.vx = (dx / dist) * speed;
+                    this.vy = (dy / dist) * speed - 3;
+                    this.gravity = 0.25; // เพิ่มบรรทัดนี้: กำหนดแรงโน้มถ่วงปกติ
+                }
+
+                this.radius = 30; // base radius (will scale)
+                // precompute gradients? we'll create per draw for resolution independence
+            }
+
+            update() {
+                this.frame++;
+                this.vy += this.gravity;
+                this.x += this.vx;
+                this.y += this.vy;
+
+                if (this.willHit && this.frame >= this.duration) {
+                    // ระเบิดเมื่อครบเวลา
+                    explodeAt(this.x, this.y, this.colorKey);
+                    return false;
+                }
+
+                if (!this.willHit && this.y > canvas.height + 150) {
+                    return false; // fall out
+                }
+
+                // ป้องกันบอลหลุดจอ (ทั้ง hit และ miss)
+                if (this.y > canvas.height + 200 || this.x < -200 || this.x > canvas.width + 200) {
+                    return false;
+                }
+
+                if (this.isSub) {
+                    // สร้าง trail ทุก 2 frames เพื่อไม่ให้หนาแน่นเกินไป
+                    if (this.frame % 2 === 0) {
+                        this.trail.push({ x: this.x, y: this.y, life: 15 }); // ลด life จาก 20 เป็น 15
+                    }
+                    if (this.trail.length > 15) this.trail.shift(); // ลดจาก 25 เป็น 15
+
+                    // ลด life ของ trail ทั้งหมด
+                    for (let i = this.trail.length - 1; i >= 0; i--) {
+                        this.trail[i].life--;
+                        if (this.trail[i].life <= 0) {
+                            this.trail.splice(i, 1);
+                        }
+                    }
+                }
+
+                return true;
+            }
+
+            draw(ctx) {
+                // compute scale (fake 3D)
+                let scale;
+                if (this.willHit) {
+                    const progress = Math.min(this.frame / this.duration, 1);
+                    scale = 1.5 - (1.0 * progress);
+                } else {
+                    const timeProgress = Math.min(this.frame / (this.duration * 1.5), 1);
+                    scale = 1.5 * Math.pow(0.3, timeProgress);
+                    scale = Math.max(scale, 0.05);
+                }
+                const r = this.radius * scale;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                // draw glitter trail (วาดหลัง translate แล้ว)
+                if (this.isSub && this.trail.length > 0) {
+                    for (let i = this.trail.length - 1; i >= 0; i--) {
+                        const t = this.trail[i];
+                        const alpha = t.life / 20;
+                        const size = 2 + alpha * 2; // ขนาดเล็กลงตามเวลา (2-4px)
+
+                        // วาดแบบ gradient เพื่อให้นุ่มนวล
+                        const gradient = ctx.createRadialGradient(
+                            t.x - this.x, t.y - this.y, 0,
+                            t.x - this.x, t.y - this.y, size * 2
+                        );
+
+                        // ใช้สีที่เข้ากับบอล (ขาวอมทอง)
+                        gradient.addColorStop(0, `rgba(255, 255, 255, ${alpha * 0.9})`);
+                        gradient.addColorStop(0.5, `rgba(255, 250, 200, ${alpha * 0.5})`);
+                        gradient.addColorStop(1, `rgba(255, 250, 200, 0)`);
+
+                        ctx.fillStyle = gradient;
+                        ctx.beginPath();
+                        ctx.arc(t.x - this.x, t.y - this.y, size * 2, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        // เพิ่มจุดเล็กๆ กลางเพื่อให้ดูเป็นประกาย
+                        ctx.globalAlpha = alpha;
+                        ctx.fillStyle = '#ffffff';
+                        ctx.beginPath();
+                        ctx.arc(t.x - this.x, t.y - this.y, size * 0.5, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalAlpha = 1;
+                    }
+                }
+
+                // shadow / glow
+                ctx.beginPath();
+                ctx.arc(0, 0, r + 4, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255,255,255,0.03)';
+                ctx.fill();
+
+                // ball gradient
+                if (this.colorKey === 'rainbow') {
+                    const grad = ctx.createLinearGradient(-r, -r, r, r);
+                    grad.addColorStop(0, '#667eea');
+                    grad.addColorStop(0.25, '#764ba2');
+                    grad.addColorStop(0.5, '#f093fb');
+                    grad.addColorStop(0.75, '#4facfe');
+                    grad.addColorStop(1, '#00f2fe');
+                    ctx.fillStyle = grad;
+                } else {
+                    const colors = SNOWBALL_COLORS[this.colorKey].base;
+                    const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.05, 0, 0, r);
+                    grad.addColorStop(0, colors[0]);
+                    grad.addColorStop(0.6, colors[1]);
+                    grad.addColorStop(1, colors[2]);
+                    ctx.fillStyle = grad;
+                }
+
+                ctx.beginPath();
+                ctx.arc(0, 0, r, 0, Math.PI * 2);
+                ctx.fill();
+
+                // subtle highlight
+                ctx.beginPath();
+                ctx.globalAlpha = 0.18;
+                ctx.ellipse(-r * 0.25, -r * 0.3, r * 0.45, r * 0.25, -0.4, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.globalAlpha = 1;
+
+                ctx.restore();
+            }
+        }
+
+        /* ================ Explosion (particles, puff) ================ */
+        function explodeAt(x, y, colorKey) {
+            // play sound
+            playImpact();
+
+            // small puff (flash)
+            puffs.push({ x, y, life: 18, max: 18 });
+
+            // particles
+            const particleCount = 16;
+            const particleColor = (colorKey === 'rainbow') ? '#fff' : SNOWBALL_COLORS[colorKey].particle;
+            for (let i = 0; i < particleCount; i++) {
+                const angle = (Math.PI * 2 * i) / particleCount + rand(-0.3, 0.3);
+                const speed = rand(2, 8);
+                particles.push({
+                    x, y,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    life: Math.floor(rand(20, 40)),
+                    color: particleColor,
+                    r: rand(2, 5)
+                });
+            }
+
+            // optional: small screen shake (we'll do a visual offset for a few frames)
+            startScreenShake(8, 10);
+        }
+
+        /* ================ Screen Shake ================ */
+        let shake = { time: 0, intensity: 0 };
+        function startScreenShake(intensity, time) {
+            shake.intensity = Math.max(shake.intensity, intensity);
+            shake.time = Math.max(shake.time, time);
+        }
+
+        /* ================ Main Render Loop ================ */
+        function render() {
+            // screen shake offset
+            let ox = 0, oy = 0;
+            if (shake.time > 0) {
+                ox = rand(-shake.intensity, shake.intensity);
+                oy = rand(-shake.intensity, shake.intensity);
+                shake.time--;
+                shake.intensity *= 0.9;
+            }
+
+            // clear with transparent background for OBS
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.translate(ox, oy);
+
+            // draw puffs (under particles so puff looks like glow)
+            for (let i = puffs.length - 1; i >= 0; i--) {
+                const p = puffs[i];
+                const prog = 1 - p.life / p.max;
+                const radius = 40 + prog * 60;
+                ctx.beginPath();
+                ctx.globalAlpha = 1 - prog;
+                const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
+                g.addColorStop(0, 'rgba(255,255,255,0.85)');
+                g.addColorStop(0.5, 'rgba(255,255,255,0.25)');
+                g.addColorStop(1, 'rgba(255,255,255,0)');
+                ctx.fillStyle = g;
+                ctx.fillRect(p.x - radius, p.y - radius, radius * 2, radius * 2);
+                ctx.globalAlpha = 1;
+                p.life--;
+                if (p.life <= 0) puffs.splice(i, 1);
+            }
+
+            // draw & update balls
+            for (let i = balls.length - 1; i >= 0; i--) {
+                const b = balls[i];
+                if (!b.update()) {
+                    balls.splice(i, 1);
+                    continue;
+                }
+                b.draw(ctx);
+            }
+
+            // update & draw particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.life--;
+                p.vy += 0.25;
+                p.x += p.vx;
+                p.y += p.vy;
+
+                ctx.globalAlpha = Math.max(0, p.life / 40);
+                ctx.beginPath();
+                ctx.fillStyle = p.color;
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            ctx.restore();
+            requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+
+        /* ================ Throwing Logic (like original) ================ */
+        function throwSnowballCenter(isSub = false) {
+            const startZones = [
+                { x: canvas.width * 0.18, y: canvas.height + 90 },
+                { x: canvas.width * 0.50, y: canvas.height + 90 },
+                { x: canvas.width * 0.82, y: canvas.height + 90 }
+            ];
+            const start = startZones[Math.floor(Math.random() * startZones.length)];
+            const center = screenCenter();
+
+            // แบ่งเป็น 2 โซน: หัว และ ลำตัว
+            const headZone = {
+                left: center.x - 65,
+                right: center.x + 65,
+                top: center.y - 240,      // ลดจาก -300 เป็น -240
+                bottom: center.y - 120    // ลดจาก -180 เป็น -120
+            };
+
+            const bodyZone = {
+                left: center.x - 140,
+                right: center.x + 140,
+                top: center.y - 120,      // ลดจาก -180 เป็น -120
+                bottom: center.y + 200    // เพิ่มจาก +150 เป็น +200 (ให้ครอบคลุมลำตัวมากขึ้น)
+            };
+
+            const willHit = Math.random() > 0.3; // 70% hit
+
+            let target;
+            if (willHit) {
+                // สุ่มว่าจะโดนหัวหรือลำตัว (30% หัว, 70% ลำตัว)
+                const hitHead = Math.random() < 0.3;
+
+                if (hitHead) {
+                    target = {
+                        x: rand(headZone.left, headZone.right),
+                        y: rand(headZone.top, headZone.bottom)
+                    };
+                } else {
+                    target = {
+                        x: rand(bodyZone.left, bodyZone.right),
+                        y: rand(bodyZone.top, bodyZone.bottom)
+                    };
+                }
+            } else {
+                // พลาด: สุ่มนอกทั้ง 2 โซน
+                const missZone = {
+                    left: headZone.left - 50,
+                    right: bodyZone.right + 50,
+                    top: headZone.top - 50,
+                    bottom: bodyZone.bottom
+                };
+
+                const side = Math.random();
+                if (side < 0.33) {
+                    target = { x: rand(0, missZone.left), y: rand(missZone.top, center.y) };
+                } else if (side < 0.66) {
+                    target = { x: rand(missZone.right, canvas.width), y: rand(missZone.top, center.y) };
+                } else {
+                    target = { x: rand(missZone.left, missZone.right), y: rand(0, missZone.top) };
+                }
+            }
+
+            balls.push(new Snowball(start, target, currentColor, willHit, isSub));
+        }
+
+        /* ================ Chat Trigger & Cooldown ================ */
+        function snowFromChat(user, isSub = false) {
+            const now = Date.now();
+            if (now - lastGlobal < GLOBAL_RATE_LIMIT) return;
+            if (user) {
+                const t = userTimestamps[user] || 0;
+                if (now - t < USER_COOLDOWN) return;
+                userTimestamps[user] = now;
+            }
+            lastGlobal = now;
+            throwSnowballCenter(isSub);
+
+            // visual feedback briefly
+            const status = document.getElementById('status');
+            status.textContent = `Last: ${user || 'local'} — ${new Date().toLocaleTimeString()}`;
+            setTimeout(() => status.textContent = 'Snowball Ready', 2500);
+        }
+
+        /* ================ TMI Setup ================ */
+        (function setupTMI() {
+            if (!CHANNEL_NAME) {
+                document.getElementById('status').textContent = 'Set CHANNEL_NAME first';
+                return;
+            }
+
+            try {
+                const client = new tmi.Client({ channels: ['#' + CHANNEL_NAME] });
+                client.connect()
+                    .then(() => {
+                        document.getElementById('status').textContent = `Listening #${CHANNEL_NAME} — type ${COMMAND}`;
+                        setTimeout(() => document.getElementById('status').style.display = 'none', 5000);
+                    })
+                    .catch(err => {
+                        console.warn('TMI connect failed', err);
+                        document.getElementById('status').textContent = 'TMI connect failed';
+                    });
+
+                client.on('message', (channel, tags, message, self) => {
+                    if (self) return;
+                    const msg = message.trim().toLowerCase();
+                    if (!msg.startsWith(COMMAND)) return;
+
+                    const parts = msg.split(' ');
+                    if (parts.length > 1 && SNOWBALL_COLORS[parts[1]]) {
+                        currentColor = parts[1];
+                    }
+
+                    const isSub = tags.subscriber || tags['msg-param-sub-plan'];
+                    snowFromChat(tags.username, isSub);
+                });
+
+            } catch (e) {
+                console.error('TMI setup error', e);
+                document.getElementById('status').textContent = 'TMI setup error';
+            }
+        })();
+
+        /* ================ Local test (press S) ================ */
+        // Auto-focus canvas for OBS compatibility
+        canvas.focus();
+
+        // Listen on canvas instead of window for better OBS support
+        canvas.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 's') {
+                throwSnowballCenter(true);
+
+                // Visual feedback
+                const status = document.getElementById('status');
+                status.style.display = 'block';
+                status.textContent = `Test fired! — ${new Date().toLocaleTimeString()}`;
+                setTimeout(() => {
+                    status.textContent = 'Snowball Ready';
+                    status.style.display = 'none';
+                }, 2500);
+            }
+        });
+
+        // Re-focus canvas when clicked (for OBS Interact mode)
+        canvas.addEventListener('click', () => canvas.focus());
+        canvas.addEventListener('mousedown', () => canvas.focus());
+
+        /* ================ StreamElements Integration ================ */
+        // Listen for StreamElements events (Channel Points redemptions)
+        window.addEventListener('onEventReceived', function (obj) {
+            if (!obj.detail || !obj.detail.event) return;
+
+            const event = obj.detail.event;
+            const listener = obj.detail.listener;
+
+            // Handle Channel Points redemptions
+            if (listener === 'redemption-latest') {
+                handleChannelPointsRedemption(event);
+            }
+        });
+
+        function handleChannelPointsRedemption(event) {
+            const rewardName = event.name || event.title || '';
+            const username = event.data?.username || event.username || 'viewer';
+            const message = event.data?.message || event.message || '';
+
+            console.log('Channel Points Redeemed:', rewardName, 'by', username);
+
+            // ตรวจสอบว่า reward ตรงกับที่ตั้งค่าไว้หรือไม่
+            const config = REWARD_CONFIG[rewardName];
+            if (!config) {
+                console.warn('Unknown reward:', rewardName);
+                return;
+            }
+
+            // กำหนดสี
+            let color = config.color;
+            if (color === 'random') {
+                const colors = Object.keys(SNOWBALL_COLORS);
+                color = colors[Math.floor(Math.random() * colors.length)];
+            }
+            currentColor = color;
+
+            // ยิงลูกบอลตามจำนวนที่กำหนด
+            for (let i = 0; i < config.count; i++) {
+                setTimeout(() => {
+                    throwSnowballCenter(config.isSub);
+                }, i * 400); // ห่างกัน 400ms
+            }
+
+            // แสดง visual feedback
+            const status = document.getElementById('status');
+            status.style.display = 'block';
+            status.textContent = `${username} redeemed ${rewardName}!`;
+            setTimeout(() => {
+                status.textContent = 'Snowball Ready';
+                status.style.display = 'none';
+            }, 3000);
+        }
+
+        /* ================ Notes: auto-hide status if in OBS ================ */
+        // If page is opened normally (not in OBS), keep status visible; OBS typically hides overlays.
+    </script>
+</body>
+
+</html>
