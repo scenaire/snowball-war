@@ -616,19 +616,24 @@
 
             const event = e.data.payload;
 
+            // 🔥 FIX ตรงนี้
             const rewardName =
-                event.reward?.title ||
-                event.reward?.name ||
+                event.redemption?.reward?.title ||
+                event.redemption?.reward?.name ||
                 '';
 
-            const username =
-                event.user?.username || 'viewer';
+            console.log('CP Reward Name:', rewardName);
 
             const config = REWARD_CONFIG[rewardName];
-            if (!config) return;
+            if (!config) {
+                console.warn('No config for reward:', rewardName);
+                return;
+            }
 
             currentColor = config.color === 'random'
-                ? Object.keys(SNOWBALL_COLORS)[Math.floor(Math.random() * Object.keys(SNOWBALL_COLORS).length)]
+                ? Object.keys(SNOWBALL_COLORS)[
+                Math.floor(Math.random() * Object.keys(SNOWBALL_COLORS).length)
+                ]
                 : config.color;
 
             for (let i = 0; i < config.count; i++) {
@@ -637,6 +642,7 @@
                 }, i * 400);
             }
         });
+
 
 
 
