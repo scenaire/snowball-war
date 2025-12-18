@@ -619,20 +619,24 @@
         });
 
         function handleChannelPointsRedemption(event) {
-            const rewardName = event.name || event.title || '';
-            const username = event.data?.username || event.username || 'viewer';
-            const message = event.data?.message || event.message || '';
+            const rewardName =
+                event.data?.rewardTitle ||
+                event.rewardTitle ||
+                '';
 
-            console.log('Channel Points Redeemed:', rewardName, 'by', username);
+            const username =
+                event.data?.username ||
+                event.username ||
+                'viewer';
 
-            // ตรวจสอบว่า reward ตรงกับที่ตั้งค่าไว้หรือไม่
+            console.log('Channel Points:', rewardName, username, event);
+
             const config = REWARD_CONFIG[rewardName];
             if (!config) {
-                console.warn('Unknown reward:', rewardName);
+                console.warn('Reward not matched:', rewardName);
                 return;
             }
 
-            // กำหนดสี
             let color = config.color;
             if (color === 'random') {
                 const colors = Object.keys(SNOWBALL_COLORS);
@@ -640,22 +644,13 @@
             }
             currentColor = color;
 
-            // ยิงลูกบอลตามจำนวนที่กำหนด
             for (let i = 0; i < config.count; i++) {
                 setTimeout(() => {
                     throwSnowballCenter(config.isSub);
-                }, i * 400); // ห่างกัน 400ms
+                }, i * 400);
             }
-
-            // แสดง visual feedback
-            const status = document.getElementById('status');
-            status.style.display = 'block';
-            status.textContent = `${username} redeemed ${rewardName}!`;
-            setTimeout(() => {
-                status.textContent = 'Snowball Ready';
-                status.style.display = 'none';
-            }, 3000);
         }
+
 
         /* ================ Notes: auto-hide status if in OBS ================ */
         // If page is opened normally (not in OBS), keep status visible; OBS typically hides overlays.
