@@ -599,37 +599,31 @@
 
         // Method 2: postMessage (when embedded in StreamElements iframe)
         window.addEventListener('message', function (event) {
-            // Security: only accept messages from trusted origins
-            // You can add origin check here if needed
+            if (!event.data) return;
 
-            if (!event.data || !event.data.detail) return;
+            const data = event.data;
 
-            const obj = event.data;
-            if (!obj.detail.event) return;
+            console.log('SE RAW EVENT:', data);
 
-            const seEvent = obj.detail.event;
-            const listener = obj.detail.listener;
-
-            console.log('Received postMessage:', listener, seEvent);
-
-            // Handle Channel Points redemptions
-            if (listener === 'redemption-latest') {
-                handleChannelPointsRedemption(seEvent);
+            // ✅ StreamElements new unified Channel Points event
+            if (data.type === 'channelPointsRedemption') {
+                handleChannelPointsRedemption(data);
             }
         });
 
+
         function handleChannelPointsRedemption(event) {
             const rewardName =
-                event.data?.rewardTitle ||
-                event.rewardTitle ||
+                event.reward?.title ||
+                event.reward?.name ||
                 '';
 
             const username =
-                event.data?.username ||
+                event.user?.username ||
                 event.username ||
                 'viewer';
 
-            console.log('Channel Points:', rewardName, username, event);
+            console.log('Channel Points OK:', rewardName, username, event);
 
             const config = REWARD_CONFIG[rewardName];
             if (!config) {
@@ -650,6 +644,7 @@
                 }, i * 400);
             }
         }
+
 
 
         /* ================ Notes: auto-hide status if in OBS ================ */
